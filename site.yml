@@ -1,0 +1,141 @@
+---
+- name: Install NGINX
+  hosts: lighthouse
+  handlers:
+    - name: NGINX | Start nginx
+      become: true
+      ansible.builtin.command:
+        name: nginx
+    - name: NGINX | Reload nginx
+      become: true
+      ansible.builtin.command:
+        name: sudo nginx -s reload
+  tasks:
+    - name: NGINX | Install epel release
+      become: true
+      ansible.builtin.yum:
+        name: epel-release
+        state: present
+    - name: Install NGINX
+      become: true
+      ansible.builtin.yum:
+        name: nginx
+        state: present
+      notify: start-nginx
+    - name: Create general config
+      become: true
+      ansible.legacy.template:
+        src: "{{ src_light }}"
+        dest: "/etc/nginx/nginx.conf"
+        mode: "0644"
+      notify: reload-nginx
+- name: Install Lighthouse
+  hosts: lighthouse
+  handlers:
+    - name: Lighthouse | Start nginx
+      become: true
+      ansible.builtin.command:
+        name: nginx
+    - name: Lighthouse | Reload nginx
+      become: true
+      ansible.builtin.command:
+        name: sudo nginx -s reload
+  pre_tasks:
+    - name: Lighthouse | Install dependencies lighthouse
+      become: true
+      ansible.builtin.yum:
+        name: git
+        state: present
+  tasks:
+    - name: Lighthouse | Creates directory
+      become: true
+      ansible.builtin.file:
+        path: "{{ lighthouse_location_dir }}"
+        state: directory
+        mode: '0644'
+    - name: Lighthouse | Copy from Git
+      become: true
+      ansible.legacy.git:
+        repo: "{{ lighthouse_vcs }}"
+        version: "v11.5.0"
+        dest: "{{ lighthouse_location_dir }}"
+    - name: Lighthouse | Create lighthouse config
+      become: true
+      ansible.legacy.template:
+        src: lighthouse.conf.j2
+        dest: /etc/nginx/conf.d/default.conf
+        mode: "0644"
+      notify: reload-nginx
+- name: Install Clickhouse
+  hosts: clickhouse
+  tasks:
+    - name: Get
+      block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "/tmp/{{ item }}-{{ clickhouse_version }}.rpm"
+            mode: '0644'
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "/tmp/clickhouse-common-static-{{ clickhouse_version }}.rpm"
+            mode: '0644'
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - /tmp/clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - /tmp/clickhouse-client-{{ clickhouse_version }}.rpm
+          - /tmp/clickhouse-server-{{ clickhouse_version }}.rpm
+      notify: Start clickhouse service
+      ignore_errors: "{{ ansible_check_mode }}"
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+    - name: Pause 20 sec
+      ansible.builtin.pause:
+        seconds: 20
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc != 82
+      changed_when: create_db.rc == 0
+- name: Install Vector
+  hosts: vector
+  tasks:
+    - name: Get Vector distrib
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/0.33.0/vector-{{ vector_version }}-{{ vector_architecture }}-unknown-linux-gnu.tar.gz"
+        dest: "/tmp/vector-{{ vector_version }}-{{ vector_architecture }}-unknown-linux-gnu.tar.gz"
+        mode: '0644'
+    - name: Create Vector directory
+      become: true
+      ansible.builtin.file:
+        path: "/etc/vector"
+        state: directory
+        mode: '0644'
+    - name: Unarchive Vector package
+      become: true
+      ansible.builtin.unarchive:
+        src: /tmp/vector-{{ vector_version }}-{{ vector_architecture }}-unknown-linux-gnu.tar.gz
+        dest: /etc/vector
+        remote_src: true
+        mode: '0644'
+    - name: Template file
+      become: true
+      ansible.builtin.template:
+        src: vector.toml.j2
+        dest: /etc/vector/vector.toml
+        mode: '0644'
+    - name: Run Vector
+      become: true
+      ansible.builtin.shell: /etc/vector/vector-x86_64-unknown-linux-gnu/bin/vector --config /etc/vector/vector.toml &
+      changed_when: true
